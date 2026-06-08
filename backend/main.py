@@ -35,6 +35,7 @@ def embed_text(text: str) -> list[float]:
     response = client.models.embed_content(
         model="gemini-embedding-001",
         contents=text,
+        config={"output_dimensionality": 1536},
     )
     return response.embeddings[0].values
 
@@ -43,6 +44,7 @@ def embed_query(text: str) -> list[float]:
     response = client.models.embed_content(
         model="gemini-embedding-001",
         contents=text,
+        config={"output_dimensionality": 1536},
     )
     return response.embeddings[0].values
 
