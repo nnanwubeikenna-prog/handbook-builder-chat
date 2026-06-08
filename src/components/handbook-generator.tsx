@@ -112,10 +112,12 @@ function HomeScreen({
   pdfs,
   onPick,
   onOpen,
+  onDelete,
 }: {
   pdfs: PdfDoc[];
   onPick: () => void;
   onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
 }) {
   const isEmpty = pdfs.length === 0;
 
