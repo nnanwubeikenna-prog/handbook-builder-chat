@@ -6,6 +6,7 @@ export interface Message {
   role: "user" | "ai";
   content: string;
   steps?: Step[];
+  streaming?: boolean;
 }
 
 interface Step {
@@ -17,7 +18,7 @@ interface PdfDoc {
   id: string;
   name: string;
   uploadedAt: Date;
-  progress: number; // 0-100
+  progress: number;
   messages: Message[];
 }
 
@@ -39,10 +40,10 @@ export function HandbookGenerator() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const onUpload = useCallback((file: File) => {
-    const id = crypto.randomUUID();
+  const onUpload = useCallback(async (file: File) => {
+    const tempId = crypto.randomUUID();
     const doc: PdfDoc = {
-      id,
+      id: tempId,
       name: file.name,
       uploadedAt: new Date(),
       progress: 0,
@@ -50,19 +51,40 @@ export function HandbookGenerator() {
     };
     setPdfs((prev) => [doc, ...prev]);
 
-    // simulate upload progress
-    let p = 0;
-    const interval = setInterval(() => {
-      p += 10 + Math.random() * 15;
-      if (p >= 100) {
-        p = 100;
-        clearInterval(interval);
-        setPdfs((prev) => prev.map((d) => (d.id === id ? { ...d, progress: 100 } : d)));
-        setTimeout(() => setActiveId(id), 400);
-      } else {
-        setPdfs((prev) => prev.map((d) => (d.id === id ? { ...d, progress: p } : d)));
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/upload");
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.min(90, Math.round((e.loaded / e.total) * 90));
+        setPdfs((prev) => prev.map((d) => (d.id === tempId ? { ...d, progress: pct } : d)));
       }
-    }, 180);
+    };
+
+    xhr.onload = () => {
+      if (xhr.status === 200) {
+        const data = JSON.parse(xhr.responseText) as { pdf_id: string; name: string; chunk_count: number };
+        setPdfs((prev) =>
+          prev.map((d) =>
+            d.id === tempId ? { ...d, id: data.pdf_id, progress: 100 } : d
+          )
+        );
+        setTimeout(() => setActiveId(data.pdf_id), 400);
+      } else {
+        setPdfs((prev) => prev.filter((d) => d.id !== tempId));
+        alert(`Upload failed: ${xhr.responseText}`);
+      }
+    };
+
+    xhr.onerror = () => {
+      setPdfs((prev) => prev.filter((d) => d.id !== tempId));
+      alert("Upload failed: network error");
+    };
+
+    xhr.send(formData);
   }, []);
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -79,10 +101,15 @@ export function HandbookGenerator() {
     setPdfs((prev) => prev.map((d) => (d.id === id ? updater(d) : d)));
   }, []);
 
-  const onDeletePDF = useCallback((pdfId: string) => {
-    console.log("onDeletePDF", pdfId);
+  const onDeletePDF = useCallback(async (pdfId: string) => {
+    try {
+      await fetch(`/api/pdf/${pdfId}`, { method: "DELETE" });
+    } catch {
+      // best-effort — remove from UI regardless
+    }
     setPdfs((prev) => prev.filter((d) => d.id !== pdfId));
-  }, []);
+    if (activeId === pdfId) setActiveId(null);
+  }, [activeId]);
 
   return (
     <div className="h-screen w-full bg-background text-foreground">
@@ -239,6 +266,7 @@ function ChatScreen({
   updateDoc: (id: string, updater: (d: PdfDoc) => PdfDoc) => void;
 }) {
   const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -254,14 +282,23 @@ function ChatScreen({
     updateDoc(doc.id, (d) => ({ ...d, messages: [...d.messages, msg] }));
   };
 
-  const onGenerateHandbook = (triggerMsgId: string) => {
-    // Initialize steps
+  const updateLastAiMessage = (docId: string, msgId: string, content: string, streaming: boolean) => {
+    updateDoc(docId, (d) => ({
+      ...d,
+      messages: d.messages.map((m) =>
+        m.id === msgId ? { ...m, content, streaming } : m
+      ),
+    }));
+  };
+
+  const onGenerateHandbook = async (pdfId: string) => {
     const initialSteps: Step[] = HANDBOOK_STEPS.map((label, i) => ({
       label: i === 0 ? `${label}...` : label,
       status: i === 0 ? "active" : "pending",
     }));
     const aiId = crypto.randomUUID();
-    updateDoc(doc.id, (d) => ({
+
+    updateDoc(pdfId, (d) => ({
       ...d,
       messages: [
         ...d.messages,
@@ -269,57 +306,98 @@ function ChatScreen({
       ],
     }));
 
-    // Animate steps
-    let i = 0;
-    const tick = () => {
-      i++;
-      updateDoc(doc.id, (d) => ({
+    let stepIdx = 0;
+    const stepInterval = setInterval(() => {
+      stepIdx++;
+      if (stepIdx >= HANDBOOK_STEPS.length) {
+        clearInterval(stepInterval);
+        return;
+      }
+      updateDoc(pdfId, (d) => ({
         ...d,
         messages: d.messages.map((m) => {
           if (m.id !== aiId || !m.steps) return m;
           const steps = m.steps.map((s, idx) => {
-            if (idx < i) return { ...s, status: "done" as const, label: HANDBOOK_STEPS[idx] };
-            if (idx === i)
-              return { ...s, status: "active" as const, label: `${HANDBOOK_STEPS[idx]}...` };
+            if (idx < stepIdx) return { ...s, status: "done" as const, label: HANDBOOK_STEPS[idx] };
+            if (idx === stepIdx) return { ...s, status: "active" as const, label: `${HANDBOOK_STEPS[idx]}...` };
             return { ...s, status: "pending" as const, label: HANDBOOK_STEPS[idx] };
           });
           return { ...m, steps };
         }),
       }));
-      if (i < HANDBOOK_STEPS.length) {
-        setTimeout(tick, 800);
-      } else {
-        updateDoc(doc.id, (d) => ({
-          ...d,
-          messages: d.messages.map((m) =>
-            m.id === aiId ? { ...m, content: "Your handbook is ready." } : m,
-          ),
-        }));
+    }, 1500);
+
+    try {
+      const res = await fetch("/api/handbook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pdf_id: pdfId }),
+      });
+
+      if (!res.ok || !res.body) {
+        throw new Error(`Handbook request failed: ${res.statusText}`);
       }
-    };
-    setTimeout(tick, 800);
-    void triggerMsgId;
+
+      clearInterval(stepInterval);
+
+      updateDoc(pdfId, (d) => ({
+        ...d,
+        messages: d.messages.map((m) =>
+          m.id === aiId
+            ? { ...m, content: "", steps: undefined, streaming: true }
+            : m
+        ),
+      }));
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        accumulated += decoder.decode(value, { stream: true });
+        updateLastAiMessage(pdfId, aiId, accumulated, true);
+      }
+
+      updateLastAiMessage(pdfId, aiId, accumulated, false);
+    } catch (err) {
+      clearInterval(stepInterval);
+      const errMsg = err instanceof Error ? err.message : "Failed to generate handbook.";
+      updateLastAiMessage(pdfId, aiId, `Error: ${errMsg}`, false);
+    }
   };
 
-  const onSendMessage = (text: string) => {
+  const onSendMessage = async (text: string) => {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed || busy) return;
+
     const userMsg: Message = { id: crypto.randomUUID(), role: "user", content: trimmed };
     appendMessage(userMsg);
+    setBusy(true);
 
     const lower = trimmed.toLowerCase();
     if (lower.includes("handbook") || lower.includes("generate")) {
-      setTimeout(() => onGenerateHandbook(userMsg.id), 300);
+      await onGenerateHandbook(doc.id);
     } else {
-      setTimeout(() => {
-        appendMessage({
-          id: crypto.randomUUID(),
-          role: "ai",
-          content:
-            "I can answer questions about this PDF or generate a full handbook. Try saying \"generate handbook\".",
+      const aiId = crypto.randomUUID();
+      appendMessage({ id: aiId, role: "ai", content: "", streaming: true });
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pdf_id: doc.id, message: trimmed }),
         });
-      }, 400);
+        if (!res.ok) throw new Error(`Chat failed: ${res.statusText}`);
+        const data = (await res.json()) as { reply: string };
+        updateLastAiMessage(doc.id, aiId, data.reply, false);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "Something went wrong.";
+        updateLastAiMessage(doc.id, aiId, `Error: ${errMsg}`, false);
+      }
     }
+
+    setBusy(false);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -330,7 +408,6 @@ function ChatScreen({
 
   return (
     <div className="flex h-full w-full flex-col">
-      {/* Top bar */}
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-background px-4">
         <div className="flex min-w-0 items-center gap-2">
           <FileText className="h-4 w-4 shrink-0 text-primary" />
@@ -345,7 +422,6 @@ function ChatScreen({
         </button>
       </header>
 
-      {/* Messages */}
       <div ref={scrollerRef} className="flex-1 overflow-y-auto px-4 py-6">
         <div className="mx-auto flex max-w-2xl flex-col gap-4">
           {doc.messages.length === 0 && (
@@ -357,10 +433,16 @@ function ChatScreen({
           {doc.messages.map((msg) => (
             <MessageBubble key={msg.id} msg={msg} />
           ))}
+          {busy && doc.messages[doc.messages.length - 1]?.role === "user" && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl bg-muted px-4 py-2.5">
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Input */}
       <div className="border-t border-border bg-background px-4 py-3">
         <form onSubmit={handleSubmit} className="mx-auto flex max-w-2xl items-center gap-2">
           <input
@@ -368,14 +450,15 @@ function ChatScreen({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Message..."
-            className="flex-1 rounded-full border border-border bg-background px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+            disabled={busy}
+            className="flex-1 rounded-full border border-border bg-background px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none disabled:opacity-50"
           />
           <button
             type="submit"
-            disabled={!input.trim()}
+            disabled={!input.trim() || busy}
             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
           >
-            <Send className="h-4 w-4" />
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
           </button>
         </form>
       </div>
@@ -392,15 +475,9 @@ function MessageBubble({ msg }: { msg: Message }) {
           <ul className="flex flex-col gap-2">
             {msg.steps.map((step, i) => (
               <li key={i} className="flex items-center gap-2 text-sm">
-                {step.status === "done" && (
-                  <Check className="h-4 w-4 shrink-0 text-green-600" />
-                )}
-                {step.status === "active" && (
-                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
-                )}
-                {step.status === "pending" && (
-                  <span className="h-4 w-4 shrink-0 rounded-full border border-border" />
-                )}
+                {step.status === "done" && <Check className="h-4 w-4 shrink-0 text-green-600" />}
+                {step.status === "active" && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />}
+                {step.status === "pending" && <span className="h-4 w-4 shrink-0 rounded-full border border-border" />}
                 <span
                   className={
                     step.status === "pending"
@@ -424,11 +501,14 @@ function MessageBubble({ msg }: { msg: Message }) {
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
           isUser ? "bg-primary text-primary-foreground" : "bg-muted text-foreground"
         }`}
       >
         {msg.content}
+        {msg.streaming && (
+          <span className="ml-1 inline-block h-3 w-1.5 animate-pulse rounded-sm bg-current opacity-70" />
+        )}
       </div>
     </div>
   );
