@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Upload, FileText, Plus, ArrowLeft, Send, Check, Loader2 } from "lucide-react";
+import { Upload, FileText, Plus, ArrowLeft, Send, Check, Loader2, Trash2 } from "lucide-react";
 
 export interface Message {
   id: string;
@@ -79,6 +79,11 @@ export function HandbookGenerator() {
     setPdfs((prev) => prev.map((d) => (d.id === id ? updater(d) : d)));
   }, []);
 
+  const onDeletePDF = useCallback((pdfId: string) => {
+    console.log("onDeletePDF", pdfId);
+    setPdfs((prev) => prev.filter((d) => d.id !== pdfId));
+  }, []);
+
   return (
     <div className="h-screen w-full bg-background text-foreground">
       <input
@@ -95,7 +100,7 @@ export function HandbookGenerator() {
           updateDoc={updateDoc}
         />
       ) : (
-        <HomeScreen pdfs={pdfs} onPick={triggerFilePicker} onOpen={setActiveId} />
+        <HomeScreen pdfs={pdfs} onPick={triggerFilePicker} onOpen={setActiveId} onDelete={onDeletePDF} />
       )}
     </div>
   );
@@ -107,10 +112,12 @@ function HomeScreen({
   pdfs,
   onPick,
   onOpen,
+  onDelete,
 }: {
   pdfs: PdfDoc[];
   onPick: () => void;
   onOpen: (id: string) => void;
+  onDelete: (id: string) => void;
 }) {
   const isEmpty = pdfs.length === 0;
 
@@ -144,7 +151,12 @@ function HomeScreen({
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto pb-24">
         {pdfs.map((doc) => (
-          <PdfCard key={doc.id} doc={doc} onClick={() => doc.progress >= 100 && onOpen(doc.id)} />
+          <PdfCard
+            key={doc.id}
+            doc={doc}
+            onClick={() => doc.progress >= 100 && onOpen(doc.id)}
+            onDelete={() => onDelete(doc.id)}
+          />
         ))}
       </div>
 
@@ -159,18 +171,19 @@ function HomeScreen({
   );
 }
 
-function PdfCard({ doc, onClick }: { doc: PdfDoc; onClick: () => void }) {
+function PdfCard({ doc, onClick, onDelete }: { doc: PdfDoc; onClick: () => void; onDelete: () => void }) {
   const uploading = doc.progress < 100;
   return (
-    <button
-      onClick={onClick}
-      disabled={uploading}
-      className="group flex w-full items-center gap-4 rounded-xl border border-border bg-card p-4 text-left transition-colors hover:border-primary/40 hover:bg-muted/40 disabled:cursor-default disabled:hover:border-border disabled:hover:bg-card"
+    <div
+      onClick={uploading ? undefined : onClick}
+      className={`group relative flex w-full items-center gap-4 rounded-xl border border-border bg-card p-4 text-left transition-colors ${
+        uploading ? "" : "cursor-pointer hover:border-primary/40 hover:bg-muted/40"
+      }`}
     >
       <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
         <FileText className="h-5 w-5" />
       </div>
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 pr-8">
         <p className="truncate text-sm font-medium text-foreground">{doc.name}</p>
         {uploading ? (
           <div className="mt-2 flex items-center gap-2">
@@ -195,7 +208,18 @@ function PdfCard({ doc, onClick }: { doc: PdfDoc; onClick: () => void }) {
           <Check className="h-4 w-4" />
         </div>
       )}
-    </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        aria-label="Delete PDF"
+        className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full text-red-500 transition-colors hover:bg-red-50"
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+    </div>
   );
 }
 
