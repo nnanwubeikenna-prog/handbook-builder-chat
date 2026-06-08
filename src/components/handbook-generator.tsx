@@ -208,7 +208,18 @@ function PdfCard({ doc, onClick, onDelete }: { doc: PdfDoc; onClick: () => void;
           <Check className="h-4 w-4" />
         </div>
       )}
-    </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        aria-label="Delete PDF"
+        className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full text-red-500 transition-colors hover:bg-red-50"
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+    </div>
   );
 }
 
