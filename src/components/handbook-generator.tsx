@@ -151,7 +151,12 @@ function HomeScreen({
 
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto pb-24">
         {pdfs.map((doc) => (
-          <PdfCard key={doc.id} doc={doc} onClick={() => doc.progress >= 100 && onOpen(doc.id)} />
+          <PdfCard
+            key={doc.id}
+            doc={doc}
+            onClick={() => doc.progress >= 100 && onOpen(doc.id)}
+            onDelete={() => onDelete(doc.id)}
+          />
         ))}
       </div>
 
