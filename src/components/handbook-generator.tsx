@@ -100,7 +100,7 @@ export function HandbookGenerator() {
           updateDoc={updateDoc}
         />
       ) : (
-        <HomeScreen pdfs={pdfs} onPick={triggerFilePicker} onOpen={setActiveId} />
+        <HomeScreen pdfs={pdfs} onPick={triggerFilePicker} onOpen={setActiveId} onDelete={onDeletePDF} />
       )}
     </div>
   );
