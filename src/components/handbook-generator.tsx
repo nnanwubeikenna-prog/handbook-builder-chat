@@ -171,18 +171,19 @@ function HomeScreen({
   );
 }
 
-function PdfCard({ doc, onClick }: { doc: PdfDoc; onClick: () => void }) {
+function PdfCard({ doc, onClick, onDelete }: { doc: PdfDoc; onClick: () => void; onDelete: () => void }) {
   const uploading = doc.progress < 100;
   return (
-    <button
-      onClick={onClick}
-      disabled={uploading}
-      className="group flex w-full items-center gap-4 rounded-xl border border-border bg-card p-4 text-left transition-colors hover:border-primary/40 hover:bg-muted/40 disabled:cursor-default disabled:hover:border-border disabled:hover:bg-card"
+    <div
+      onClick={uploading ? undefined : onClick}
+      className={`group relative flex w-full items-center gap-4 rounded-xl border border-border bg-card p-4 text-left transition-colors ${
+        uploading ? "" : "cursor-pointer hover:border-primary/40 hover:bg-muted/40"
+      }`}
     >
       <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
         <FileText className="h-5 w-5" />
       </div>
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 pr-8">
         <p className="truncate text-sm font-medium text-foreground">{doc.name}</p>
         {uploading ? (
           <div className="mt-2 flex items-center gap-2">
