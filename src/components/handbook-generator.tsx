@@ -79,6 +79,11 @@ export function HandbookGenerator() {
     setPdfs((prev) => prev.map((d) => (d.id === id ? updater(d) : d)));
   }, []);
 
+  const onDeletePDF = useCallback((pdfId: string) => {
+    console.log("onDeletePDF", pdfId);
+    setPdfs((prev) => prev.filter((d) => d.id !== pdfId));
+  }, []);
+
   return (
     <div className="h-screen w-full bg-background text-foreground">
       <input
