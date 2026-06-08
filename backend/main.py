@@ -33,18 +33,16 @@ app.add_middleware(
 
 def embed_text(text: str) -> list[float]:
     response = client.models.embed_content(
-        model="models/embedding-001",
+        model="gemini-embedding-001",
         contents=text,
-        config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
     )
     return response.embeddings[0].values
 
 
 def embed_query(text: str) -> list[float]:
     response = client.models.embed_content(
-        model="models/embedding-001",
+        model="gemini-embedding-001",
         contents=text,
-        config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
     )
     return response.embeddings[0].values
 
