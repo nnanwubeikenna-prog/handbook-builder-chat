@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Upload, FileText, Plus, ArrowLeft, Send, Check, Loader2 } from "lucide-react";
+import { Upload, FileText, Plus, ArrowLeft, Send, Check, Loader2, Trash2 } from "lucide-react";
 
 export interface Message {
   id: string;
