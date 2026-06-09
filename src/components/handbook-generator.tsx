@@ -292,12 +292,13 @@ function ChatScreen({
   };
 
   const onGenerateHandbook = async (pdfId: string) => {
+    const aiId = crypto.randomUUID();
+
+    // Show the animated steps panel while we wait for the backend to start
     const initialSteps: Step[] = HANDBOOK_STEPS.map((label, i) => ({
       label: i === 0 ? `${label}...` : label,
       status: i === 0 ? "active" : "pending",
     }));
-    const aiId = crypto.randomUUID();
-
     updateDoc(pdfId, (d) => ({
       ...d,
       messages: [
@@ -309,10 +310,7 @@ function ChatScreen({
     let stepIdx = 0;
     const stepInterval = setInterval(() => {
       stepIdx++;
-      if (stepIdx >= HANDBOOK_STEPS.length) {
-        clearInterval(stepInterval);
-        return;
-      }
+      if (stepIdx >= HANDBOOK_STEPS.length) { clearInterval(stepInterval); return; }
       updateDoc(pdfId, (d) => ({
         ...d,
         messages: d.messages.map((m) => {
@@ -338,33 +336,48 @@ function ChatScreen({
         throw new Error(`Handbook request failed: ${res.statusText}`);
       }
 
+      // Response headers received — switch the message from steps to streaming text
       clearInterval(stepInterval);
-
       updateDoc(pdfId, (d) => ({
         ...d,
         messages: d.messages.map((m) =>
-          m.id === aiId
-            ? { ...m, content: "", steps: undefined, streaming: true }
-            : m
+          m.id === aiId ? { ...m, content: "", steps: undefined, streaming: true } : m
         ),
       }));
 
+      // Read the plain-text stream and append each chunk as it arrives
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let accumulated = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        accumulated += decoder.decode(value, { stream: true });
-        updateLastAiMessage(pdfId, aiId, accumulated, true);
+        const chunk = decoder.decode(value);
+        // Append chunk directly via functional updater — no stale-closure risk
+        updateDoc(pdfId, (d) => ({
+          ...d,
+          messages: d.messages.map((m) =>
+            m.id === aiId ? { ...m, content: m.content + chunk, streaming: true } : m
+          ),
+        }));
       }
 
-      updateLastAiMessage(pdfId, aiId, accumulated, false);
+      // Mark streaming done
+      updateDoc(pdfId, (d) => ({
+        ...d,
+        messages: d.messages.map((m) =>
+          m.id === aiId ? { ...m, streaming: false } : m
+        ),
+      }));
     } catch (err) {
       clearInterval(stepInterval);
       const errMsg = err instanceof Error ? err.message : "Failed to generate handbook.";
-      updateLastAiMessage(pdfId, aiId, `Error: ${errMsg}`, false);
+      updateDoc(pdfId, (d) => ({
+        ...d,
+        messages: d.messages.map((m) =>
+          m.id === aiId ? { ...m, content: `Error: ${errMsg}`, steps: undefined, streaming: false } : m
+        ),
+      }));
     }
   };
 

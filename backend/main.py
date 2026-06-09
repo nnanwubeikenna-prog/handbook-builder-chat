@@ -1,3 +1,4 @@
+import asyncio
 import os
 import uuid
 import tempfile
@@ -215,7 +216,9 @@ async def generate_handbook(req: HandbookRequest):
         for title, instruction in HANDBOOK_SECTIONS:
             yield f"## {title}\n\n".encode("utf-8")
             try:
-                text = generate_section(all_content, title, instruction)
+                # Run the blocking Gemini call in a thread so the event loop
+                # stays free to flush buffered chunks to the client
+                text = await asyncio.to_thread(generate_section, all_content, title, instruction)
                 yield text.encode("utf-8")
             except Exception as e:
                 yield f"*(Error generating this section: {e})*\n".encode("utf-8")
