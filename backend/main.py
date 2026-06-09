@@ -146,7 +146,7 @@ async def chat(req: ChatRequest):
     )
 
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-3.5-flash",
         contents=prompt,
     )
     reply = response.text if response.text else "Sorry, I couldn't generate a response."
@@ -183,7 +183,7 @@ async def generate_handbook(req: HandbookRequest):
 
     async def stream_response() -> AsyncGenerator[bytes, None]:
         for chunk in client.models.generate_content_stream(
-            model="gemini-1.5-flash",
+            model="gemini-3.5-flash",
             contents=full_prompt,
         ):
             if chunk.text:
