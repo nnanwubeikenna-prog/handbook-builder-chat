@@ -147,7 +147,7 @@ async def chat(req: ChatRequest):
     )
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.1-flash-lite",
         contents=prompt,
     )
     reply = response.text if response.text else "Sorry, I couldn't generate a response."
@@ -183,7 +183,7 @@ def generate_section(context: str, section_title: str, section_instruction: str,
     for attempt in range(retries):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.1-flash-lite",
                 contents=prompt,
             )
             return response.text or ""
