@@ -4,7 +4,7 @@ set -e
 ulimit -n 65536 2>/dev/null || true
 
 echo "Starting backend..."
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload &
+uvicorn backend.main:app --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 
 echo "Starting frontend..."
