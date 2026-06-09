@@ -1,7 +1,9 @@
 import asyncio
 import os
+import sqlite3
 import uuid
 import tempfile
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 import pdfplumber
@@ -20,6 +22,32 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+# ---------------------------------------------------------------------------
+# SQLite metadata store — persists pdf_id + pdf_name + created_at on disk
+# so the home screen survives app restarts and Replit sleeps.
+# ---------------------------------------------------------------------------
+DB_PATH = os.path.join(os.path.dirname(__file__), "pdf_metadata.db")
+
+def _get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _init_db() -> None:
+    with _get_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pdf_metadata (
+                pdf_id    TEXT PRIMARY KEY,
+                pdf_name  TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+_init_db()
 
 app = FastAPI(title="Handbook Generator API")
 
@@ -62,6 +90,15 @@ class HandbookRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/pdfs")
+async def list_pdfs():
+    with _get_db() as conn:
+        rows = conn.execute(
+            "SELECT pdf_id, pdf_name, created_at FROM pdf_metadata ORDER BY created_at ASC"
+        ).fetchall()
+    return [{"pdf_id": r["pdf_id"], "pdf_name": r["pdf_name"], "created_at": r["created_at"]} for r in rows]
 
 
 @app.post("/upload")
@@ -107,6 +144,15 @@ async def upload_pdf(file: UploadFile = File(...)):
         })
 
     supabase.table("documents").insert(rows).execute()
+
+    # Persist metadata locally so the home screen survives restarts
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO pdf_metadata (pdf_id, pdf_name, created_at) VALUES (?, ?, ?)",
+            (pdf_id, file.filename, now),
+        )
+        conn.commit()
 
     return {"pdf_id": pdf_id, "name": file.filename, "chunk_count": len(rows)}
 
@@ -235,4 +281,7 @@ async def generate_handbook(req: HandbookRequest):
 @app.delete("/pdf/{pdf_id}")
 async def delete_pdf(pdf_id: str):
     supabase.table("documents").delete().eq("pdf_id", pdf_id).execute()
+    with _get_db() as conn:
+        conn.execute("DELETE FROM pdf_metadata WHERE pdf_id = ?", (pdf_id,))
+        conn.commit()
     return {"success": True}

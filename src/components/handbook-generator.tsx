@@ -40,6 +40,25 @@ export function HandbookGenerator() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Load previously uploaded PDFs from Supabase on startup
+  useEffect(() => {
+    fetch("/api/pdfs")
+      .then((r) => r.json())
+      .then((data: { pdf_id: string; pdf_name: string; created_at: string | null }[]) => {
+        const loaded: PdfDoc[] = data.map((item) => ({
+          id: item.pdf_id,
+          name: item.pdf_name,
+          uploadedAt: item.created_at ? new Date(item.created_at) : new Date(),
+          progress: 100,
+          messages: [],
+        }));
+        setPdfs(loaded);
+      })
+      .catch(() => {
+        // Supabase not configured yet — start with empty list
+      });
+  }, []);
+
   const onUpload = useCallback(async (file: File) => {
     const tempId = crypto.randomUUID();
     const doc: PdfDoc = {
