@@ -147,7 +147,7 @@ async def chat(req: ChatRequest):
     )
 
     response = client.models.generate_content(
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         contents=prompt,
     )
     reply = response.text if response.text else "Sorry, I couldn't generate a response."
@@ -169,8 +169,13 @@ HANDBOOK_SECTIONS = [
 
 def generate_section(context: str, section_title: str, section_instruction: str, retries: int = 3) -> str:
     prompt = (
-        "You are an expert technical writer creating one section of a comprehensive handbook.\n"
-        "Use the provided document content as your source material. Be detailed and thorough.\n\n"
+        "You are an expert technical writer. "
+        "Using the provided document content as your primary source, write a comprehensive "
+        "handbook of at least 20000 words. "
+        "Expand thoroughly on every concept. "
+        "Add detailed explanations, examples, and best practices. "
+        "Where you reference specific information from the source document, add inline citations like [Source: document name]. "
+        "Structure with: Table of Contents, Introduction, 8 detailed sections with subheadings, and Conclusion.\n\n"
         f"Document content:\n{context}\n\n"
         f"{section_instruction} Write in a professional, detailed style with subheadings where appropriate."
     )
@@ -178,7 +183,7 @@ def generate_section(context: str, section_title: str, section_instruction: str,
     for attempt in range(retries):
         try:
             response = client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-2.5-flash",
                 contents=prompt,
             )
             return response.text or ""
