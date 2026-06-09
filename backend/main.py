@@ -154,6 +154,44 @@ async def chat(req: ChatRequest):
     return {"reply": reply}
 
 
+HANDBOOK_SECTIONS = [
+    ("Introduction", "Write a thorough Introduction of approximately 2000 words."),
+    ("Section 1: Overview", "Write Section 1: Overview of approximately 2000 words."),
+    ("Section 2: Core Concepts", "Write Section 2: Core Concepts of approximately 2000 words."),
+    ("Section 3: Methodology", "Write Section 3: Methodology of approximately 2000 words."),
+    ("Section 4: Implementation", "Write Section 4: Implementation of approximately 2000 words."),
+    ("Section 5: Results and Analysis", "Write Section 5: Results and Analysis of approximately 2000 words."),
+    ("Section 6: Best Practices", "Write Section 6: Best Practices of approximately 2000 words."),
+    ("Conclusion", "Write a thorough Conclusion of approximately 2000 words."),
+]
+
+
+def generate_section(context: str, section_title: str, section_instruction: str, retries: int = 3) -> str:
+    prompt = (
+        "You are an expert technical writer creating one section of a comprehensive handbook.\n"
+        "Use the provided document content as your source material. Be detailed and thorough.\n\n"
+        f"Document content:\n{context}\n\n"
+        f"{section_instruction} Write in a professional, detailed style with subheadings where appropriate."
+    )
+    last_err = None
+    for attempt in range(retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt,
+            )
+            return response.text or ""
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            if "503" in err_str or "overloaded" in err_str.lower():
+                import time
+                time.sleep(2 ** attempt)
+                continue
+            raise
+    raise last_err
+
+
 @app.post("/handbook")
 async def generate_handbook(req: HandbookRequest):
     rows = (
@@ -168,26 +206,20 @@ async def generate_handbook(req: HandbookRequest):
 
     all_content = "\n\n".join(r["content"] for r in rows.data)
 
-    system_prompt = (
-        "You are an expert technical writer. "
-        "Using the provided document content, write a comprehensive handbook of at least 20000 words. "
-        "Structure it with:\n"
-        "1. Table of Contents\n"
-        "2. Introduction\n"
-        "3. Minimum 8 detailed sections with subheadings\n"
-        "4. Conclusion\n"
-        "Use all provided content thoroughly. Be detailed and comprehensive."
-    )
-
-    full_prompt = f"{system_prompt}\n\nDocument content:\n\n{all_content}"
-
     async def stream_response() -> AsyncGenerator[bytes, None]:
-        for chunk in client.models.generate_content_stream(
-            model="gemini-3.5-flash",
-            contents=full_prompt,
-        ):
-            if chunk.text:
-                yield chunk.text.encode("utf-8")
+        yield "# Handbook\n\n## Table of Contents\n\n".encode("utf-8")
+        for i, (title, _) in enumerate(HANDBOOK_SECTIONS, 1):
+            yield f"{i}. {title}\n".encode("utf-8")
+        yield "\n---\n\n".encode("utf-8")
+
+        for title, instruction in HANDBOOK_SECTIONS:
+            yield f"## {title}\n\n".encode("utf-8")
+            try:
+                text = generate_section(all_content, title, instruction)
+                yield text.encode("utf-8")
+            except Exception as e:
+                yield f"*(Error generating this section: {e})*\n".encode("utf-8")
+            yield "\n\n---\n\n".encode("utf-8")
 
     return StreamingResponse(stream_response(), media_type="text/plain; charset=utf-8")
 
