@@ -108,6 +108,18 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     pdf_id = str(uuid.uuid4())
 
+    # De-duplicate: if a PDF with the same filename was uploaded before,
+    # remove its old chunks from Supabase and its metadata from SQLite first.
+    with _get_db() as conn:
+        existing = conn.execute(
+            "SELECT pdf_id FROM pdf_metadata WHERE pdf_name = ?", (file.filename,)
+        ).fetchone()
+        if existing:
+            old_id = existing["pdf_id"]
+            supabase.table("documents").delete().eq("pdf_id", old_id).execute()
+            conn.execute("DELETE FROM pdf_metadata WHERE pdf_id = ?", (old_id,))
+            conn.commit()
+
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
