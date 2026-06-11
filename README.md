@@ -110,13 +110,9 @@ Request 8: Write the Conclusion
 Each request receives the full PDF context 
 retrieved from Supabase pgvector. Each response 
 is approximately 2,000 words. All 8 responses 
-are combined and streamed to the frontend 
-progressively as each section completes, so 
-the user sees text appearing in real time 
-rather than waiting for the full document.
+are combined into a single coherent document 
+with a total output of 16,000 to 20,000+ words.
 
-Total output: 16,000 to 20,000+ words per 
-handbook generation.
 
 ### How Duplicate Data Was Prevented
 
@@ -147,7 +143,4 @@ This means conversations about one document
 never mix with content from another document, 
 even if both documents cover similar topics.
 Each request receives the full PDF context 
-retrieved from Supabase pgvector. Each response 
-is approximately 2,000 words. All 8 responses 
-are combined into a single coherent document 
-with a total output of 16,000 to 20,000+ words.
+retrieved from Supabase pgvector. 
