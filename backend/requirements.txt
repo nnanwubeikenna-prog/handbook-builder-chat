@@ -2,6 +2,6 @@ fastapi
 uvicorn
 python-multipart
 pdfplumber
-supabase
+psycopg2-binary
 google-genai
 langchain-text-splitters

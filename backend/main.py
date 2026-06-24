@@ -6,6 +6,8 @@ import tempfile
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 
+import psycopg2
+import psycopg2.extras
 import pdfplumber
 from google import genai
 from google.genai import types
@@ -13,15 +15,17 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from supabase import create_client, Client
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+
+def get_db_conn():
+    return psycopg2.connect(DATABASE_URL)
+
 
 # ---------------------------------------------------------------------------
 # SQLite metadata store — persists pdf_id + pdf_name + created_at on disk
@@ -29,10 +33,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 # ---------------------------------------------------------------------------
 DB_PATH = os.path.join(os.path.dirname(__file__), "pdf_metadata.db")
 
+
 def _get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def _init_db() -> None:
     with _get_db() as conn:
@@ -46,6 +52,7 @@ def _init_db() -> None:
             """
         )
         conn.commit()
+
 
 _init_db()
 
@@ -109,16 +116,19 @@ async def upload_pdf(file: UploadFile = File(...)):
     pdf_id = str(uuid.uuid4())
 
     # De-duplicate: if a PDF with the same filename was uploaded before,
-    # remove its old chunks from Supabase and its metadata from SQLite first.
-    with _get_db() as conn:
-        existing = conn.execute(
+    # remove its old chunks and metadata first.
+    with _get_db() as meta_conn:
+        existing = meta_conn.execute(
             "SELECT pdf_id FROM pdf_metadata WHERE pdf_name = ?", (file.filename,)
         ).fetchone()
         if existing:
             old_id = existing["pdf_id"]
-            supabase.table("documents").delete().eq("pdf_id", old_id).execute()
-            conn.execute("DELETE FROM pdf_metadata WHERE pdf_id = ?", (old_id,))
-            conn.commit()
+            with get_db_conn() as pg:
+                with pg.cursor() as cur:
+                    cur.execute("DELETE FROM documents WHERE pdf_id = %s", (old_id,))
+                pg.commit()
+            meta_conn.execute("DELETE FROM pdf_metadata WHERE pdf_id = ?", (old_id,))
+            meta_conn.commit()
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(await file.read())
@@ -149,22 +159,25 @@ async def upload_pdf(file: UploadFile = File(...)):
     rows = []
     for chunk in chunks:
         embedding = embed_text(chunk)
-        rows.append({
-            "pdf_id": pdf_id,
-            "content": chunk,
-            "embedding": embedding,
-        })
+        rows.append((pdf_id, chunk, embedding))
 
-    supabase.table("documents").insert(rows).execute()
+    with get_db_conn() as pg:
+        with pg.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO documents (pdf_id, content, embedding) VALUES %s",
+                [(pdf_id, chunk, embedding) for pdf_id, chunk, embedding in rows],
+                template="(%s, %s, %s::vector)",
+            )
+        pg.commit()
 
-    # Persist metadata locally so the home screen survives restarts
     now = datetime.now(timezone.utc).isoformat()
-    with _get_db() as conn:
-        conn.execute(
+    with _get_db() as meta_conn:
+        meta_conn.execute(
             "INSERT OR REPLACE INTO pdf_metadata (pdf_id, pdf_name, created_at) VALUES (?, ?, ?)",
             (pdf_id, file.filename, now),
         )
-        conn.commit()
+        meta_conn.commit()
 
     return {"pdf_id": pdf_id, "name": file.filename, "chunk_count": len(rows)}
 
@@ -173,28 +186,28 @@ async def upload_pdf(file: UploadFile = File(...)):
 async def chat(req: ChatRequest):
     query_embedding = embed_query(req.message)
 
+    context_chunks = []
     try:
-        result = supabase.rpc(
-            "match_documents",
-            {
-                "query_embedding": query_embedding,
-                "match_count": 5,
-                "filter_pdf_id": req.pdf_id,
-            },
-        ).execute()
-        context_chunks = [r["content"] for r in (result.data or [])]
+        with get_db_conn() as pg:
+            with pg.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT content FROM match_documents(%s::vector, %s, %s)
+                    """,
+                    (query_embedding, 5, req.pdf_id),
+                )
+                context_chunks = [row[0] for row in cur.fetchall()]
     except Exception:
-        context_chunks = []
+        pass
 
     if not context_chunks:
-        rows = (
-            supabase.table("documents")
-            .select("content")
-            .eq("pdf_id", req.pdf_id)
-            .limit(5)
-            .execute()
-        )
-        context_chunks = [r["content"] for r in (rows.data or [])]
+        with get_db_conn() as pg:
+            with pg.cursor() as cur:
+                cur.execute(
+                    "SELECT content FROM documents WHERE pdf_id = %s LIMIT 5",
+                    (req.pdf_id,),
+                )
+                context_chunks = [row[0] for row in cur.fetchall()]
 
     context = "\n\n".join(context_chunks)
 
@@ -205,7 +218,7 @@ async def chat(req: ChatRequest):
     )
 
     response = client.models.generate_content(
-        model="gemini-3.1-flash-lite",
+        model="gemini-2.5-flash",
         contents=prompt,
     )
     reply = response.text if response.text else "Sorry, I couldn't generate a response."
@@ -241,7 +254,7 @@ def generate_section(context: str, section_title: str, section_instruction: str,
     for attempt in range(retries):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite",
+                model="gemini-2.5-flash",
                 contents=prompt,
             )
             return response.text or ""
@@ -258,17 +271,18 @@ def generate_section(context: str, section_title: str, section_instruction: str,
 
 @app.post("/handbook")
 async def generate_handbook(req: HandbookRequest):
-    rows = (
-        supabase.table("documents")
-        .select("content")
-        .eq("pdf_id", req.pdf_id)
-        .execute()
-    )
+    with get_db_conn() as pg:
+        with pg.cursor() as cur:
+            cur.execute(
+                "SELECT content FROM documents WHERE pdf_id = %s",
+                (req.pdf_id,),
+            )
+            rows = cur.fetchall()
 
-    if not rows.data:
+    if not rows:
         raise HTTPException(status_code=404, detail="No document chunks found for this PDF.")
 
-    all_content = "\n\n".join(r["content"] for r in rows.data)
+    all_content = "\n\n".join(row[0] for row in rows)
 
     async def stream_response() -> AsyncGenerator[bytes, None]:
         yield "# Handbook\n\n## Table of Contents\n\n".encode("utf-8")
@@ -279,8 +293,6 @@ async def generate_handbook(req: HandbookRequest):
         for title, instruction in HANDBOOK_SECTIONS:
             yield f"## {title}\n\n".encode("utf-8")
             try:
-                # Run the blocking Gemini call in a thread so the event loop
-                # stays free to flush buffered chunks to the client
                 text = await asyncio.to_thread(generate_section, all_content, title, instruction)
                 yield text.encode("utf-8")
             except Exception as e:
@@ -292,8 +304,11 @@ async def generate_handbook(req: HandbookRequest):
 
 @app.delete("/pdf/{pdf_id}")
 async def delete_pdf(pdf_id: str):
-    supabase.table("documents").delete().eq("pdf_id", pdf_id).execute()
-    with _get_db() as conn:
-        conn.execute("DELETE FROM pdf_metadata WHERE pdf_id = ?", (pdf_id,))
-        conn.commit()
+    with get_db_conn() as pg:
+        with pg.cursor() as cur:
+            cur.execute("DELETE FROM documents WHERE pdf_id = %s", (pdf_id,))
+        pg.commit()
+    with _get_db() as meta_conn:
+        meta_conn.execute("DELETE FROM pdf_metadata WHERE pdf_id = ?", (pdf_id,))
+        meta_conn.commit()
     return {"success": True}
