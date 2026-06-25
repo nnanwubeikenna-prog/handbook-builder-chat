@@ -58,13 +58,13 @@ async def lifespan(app: FastAPI):
         db_name = await _discover_neo4j_database()
         print(f"[Graphiti] Using Neo4j database: {db_name}")
         llm_client = GeminiClient(
-            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-2.5-flash-lite")
+            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-3.1-flash-lite")
         )
         embedder = GeminiEmbedder(
-            GeminiEmbedderConfig(api_key=GEMINI_API_KEY, embedding_model="gemini-embedding-001")
+            GeminiEmbedderConfig(api_key=GEMINI_API_KEY, embedding_model="models/gemini-embedding-001")
         )
         cross_encoder = GeminiRerankerClient(
-            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-2.5-flash-lite")
+            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-3.1-flash-lite")
         )
         graph_driver = Neo4jDriver(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, database=db_name)
         graphiti = Graphiti(
@@ -282,12 +282,26 @@ async def chat(req: ChatRequest):
                 )
                 context_chunks = [row[0] for row in cur.fetchall()]
 
-    context = "\n\n".join(context_chunks)
+    pdf_chunks = "\n\n".join(context_chunks)
+
+    graphiti_facts = ""
+    if graphiti:
+        try:
+            results = await graphiti.search(
+                query=req.message,
+                group_ids=[req.pdf_id],
+                num_results=10,
+            )
+            facts = [r.fact for r in results if hasattr(r, "fact") and r.fact]
+            if facts:
+                graphiti_facts = "\n".join(f"- {f}" for f in facts)
+        except Exception as exc:
+            print(f"[Graphiti] search failed (non-critical): {type(exc).__name__}")
 
     prompt = (
-        f"Use the following document excerpts to answer the question.\n\n"
-        f"Document context:\n{context}\n\n"
-        f"Question: {req.message}"
+        f"Previous conversation facts:\n{graphiti_facts}\n\n"
+        f"PDF content:\n{pdf_chunks}\n\n"
+        f"User question:\n{req.message}"
     )
 
     response = gemini_client.models.generate_content(
@@ -372,7 +386,7 @@ HANDBOOK_SECTIONS = [
 ]
 
 
-def generate_section(context: str, section_title: str, section_instruction: str, retries: int = 3) -> str:
+def generate_section(context: str, section_title: str, section_instruction: str, graphiti_facts: str = "", retries: int = 3) -> str:
     prompt = (
         "You are an expert technical writer. "
         "Using the provided document content as your primary source, write a comprehensive "
@@ -381,7 +395,8 @@ def generate_section(context: str, section_title: str, section_instruction: str,
         "Add detailed explanations, examples, and best practices. "
         "Where you reference specific information from the source document, add inline citations like [Source: document name]. "
         "Structure with: Table of Contents, Introduction, 8 detailed sections with subheadings, and Conclusion.\n\n"
-        f"Document content:\n{context}\n\n"
+        f"Previous conversation facts:\n{graphiti_facts}\n\n"
+        f"PDF content:\n{context}\n\n"
         f"{section_instruction} Write in a professional, detailed style with subheadings where appropriate."
     )
     last_err = None
@@ -418,6 +433,20 @@ async def generate_handbook(req: HandbookRequest):
 
     all_content = "\n\n".join(row[0] for row in rows)
 
+    graphiti_facts = ""
+    if graphiti:
+        try:
+            results = await graphiti.search(
+                query="key topics concepts facts",
+                group_ids=[req.pdf_id],
+                num_results=10,
+            )
+            facts = [r.fact for r in results if hasattr(r, "fact") and r.fact]
+            if facts:
+                graphiti_facts = "\n".join(f"- {f}" for f in facts)
+        except Exception as exc:
+            print(f"[Graphiti] search failed (non-critical): {type(exc).__name__}")
+
     async def stream_response() -> AsyncGenerator[bytes, None]:
         yield "# Handbook\n\n## Table of Contents\n\n".encode("utf-8")
         for i, (title, _) in enumerate(HANDBOOK_SECTIONS, 1):
@@ -427,7 +456,7 @@ async def generate_handbook(req: HandbookRequest):
         for title, instruction in HANDBOOK_SECTIONS:
             yield f"## {title}\n\n".encode("utf-8")
             try:
-                text = await asyncio.to_thread(generate_section, all_content, title, instruction)
+                text = await asyncio.to_thread(generate_section, all_content, title, instruction, graphiti_facts)
                 yield text.encode("utf-8")
             except Exception as e:
                 yield f"*(Error generating this section: {e})*\n".encode("utf-8")
