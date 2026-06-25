@@ -144,3 +144,32 @@ never mix with content from another document,
 even if both documents cover similar topics.
 Each request receives the full PDF context 
 retrieved from Supabase pgvector. 
+
+## Recent Improvements
+
+### Neo4j + Graphiti Memory Integration
+Added Neo4j AuraDB with Graphiti library.
+Chat episodes are stored directly to Neo4j 
+per PDF using group_id isolation. Graphiti 
+search queries Neo4j on every chat request 
+to retrieve relevant context from previous 
+conversations before generating responses.
+
+Note: Full entity extraction via Graphiti 
+add_episode is planned — currently limited 
+by Gemini free tier quota (20 requests/day). 
+Direct Cypher writes are used as an interim 
+solution while exploring Groq as an 
+alternative LLM for entity extraction.
+
+### Chat History Persistence
+Each PDF has its own isolated conversation 
+thread stored in PostgreSQL. Previous messages 
+load automatically when returning to a PDF chat.
+
+### Duplicate PDF Prevention
+Re-uploading the same PDF automatically removes 
+old data before storing fresh content.
+
+### Tech Stack Update
+Added: Neo4j AuraDB, Graphiti, PostgreSQL
