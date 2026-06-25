@@ -286,12 +286,36 @@ function ChatScreen({
 }) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const historyLoadedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     inputRef.current?.focus();
   }, [doc.id]);
+
+  useEffect(() => {
+    if (historyLoadedRef.current.has(doc.id)) return;
+    historyLoadedRef.current.add(doc.id);
+    setLoadingHistory(true);
+    fetch(`/api/messages/${doc.id}`)
+      .then((r) => r.json())
+      .then((data: { role: string; content: string; timestamp: string }[]) => {
+        if (!data.length) return;
+        const history: Message[] = data.map((m) => ({
+          id: crypto.randomUUID(),
+          role: m.role as "user" | "ai",
+          content: m.content,
+        }));
+        updateDoc(doc.id, (d) => ({
+          ...d,
+          messages: [...history, ...d.messages],
+        }));
+      })
+      .catch(() => {})
+      .finally(() => setLoadingHistory(false));
+  }, [doc.id, updateDoc]);
 
   useEffect(() => {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight, behavior: "smooth" });
@@ -456,7 +480,15 @@ function ChatScreen({
 
       <div ref={scrollerRef} className="flex-1 overflow-y-auto px-4 py-6">
         <div className="mx-auto flex max-w-2xl flex-col gap-4">
-          {doc.messages.length === 0 && (
+          {loadingHistory && (
+            <div className="flex justify-center py-2">
+              <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Loading chat history…
+              </span>
+            </div>
+          )}
+          {!loadingHistory && doc.messages.length === 0 && (
             <div className="mt-8 text-center text-sm text-muted-foreground">
               Ask anything about <span className="text-foreground">{doc.name}</span>, or type
               "generate handbook" to begin.

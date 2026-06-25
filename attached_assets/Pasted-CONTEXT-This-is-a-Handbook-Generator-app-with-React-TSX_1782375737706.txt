@@ -1,0 +1,87 @@
+CONTEXT:
+This is a Handbook Generator app with:
+- React/TSX frontend (handbook-generator.tsx)
+- FastAPI Python backend (backend/main.py)
+- Replit PostgreSQL for vector storage
+- Gemini for embeddings and LLM generation
+- SQLite for PDF metadata
+
+Each PDF has its own isolated chat workspace 
+identified by a unique pdf_id.
+
+New secrets already added to Replit:
+- NEO4J_URI
+- NEO4J_USERNAME
+- NEO4J_PASSWORD
+- GEMINI_API_KEY (already exists)
+
+FEATURE TO ADD:
+Add Graphiti temporal knowledge graph memory 
+using Neo4j AuraDB so chat history persists 
+across sessions per PDF document.
+
+BACKEND (backend/main.py):
+
+1. Add to requirements.txt:
+   graphiti-core[google-genai]
+   neo4j
+
+2. Initialize Graphiti at startup:
+   from graphiti_core import Graphiti
+   from graphiti_core.llm_client.gemini_client 
+   import GeminiClient, GeminiConfig
+   from graphiti_core.embedder.gemini 
+   import GeminiEmbedder, GeminiEmbedderConfig
+
+   llm_client = GeminiClient(
+     GeminiConfig(model="gemini-2.5-flash")
+   )
+   embedder = GeminiEmbedder(
+     GeminiEmbedderConfig(
+       model="models/gemini-embedding-001"
+     )
+   )
+   graphiti = Graphiti(
+     NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD,
+     llm_client=llm_client,
+     embedder=embedder
+   )
+   await graphiti.build_indices_and_constraints()
+
+3. In POST /api/chat endpoint, after generating 
+   AI response, save episode to Graphiti:
+   await graphiti.add_episode(
+     name=f"chat_{pdf_id}_{timestamp}",
+     episode_body=f"User: {message}\nAI: {response}",
+     source=EpisodeType.message,
+     source_description=f"Chat for PDF {pdf_id}",
+     group_id=pdf_id
+   )
+
+4. Add GET /api/messages/{pdf_id} endpoint:
+   Search Graphiti for episodes with 
+   group_id=pdf_id and return them as 
+   chat messages ordered by time.
+   Use graphiti.search() with group_ids=[pdf_id]
+
+FRONTEND (src/components/handbook-generator.tsx):
+
+1. When user opens a PDF chat screen, call 
+   GET /api/messages/{pdf_id} to load previous 
+   chat history from Neo4j Graphiti
+
+2. Display loaded messages in chat before 
+   any new messages so user sees full history
+
+3. Each PDF chat is isolated by its pdf_id 
+   as the group_id in Graphiti
+
+Do not change upload, handbook generation, 
+or any other existing functionality.
+
+Test by:
+1. Uploading a PDF
+2. Sending a message
+3. Refreshing the page
+4. Opening same PDF chat
+5. Confirming previous message appears

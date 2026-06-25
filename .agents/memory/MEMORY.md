@@ -1,0 +1,2 @@
+- [Neo4j AuraDB database name](neo4j-auradb-db-name.md) — AuraDB Free uses a non-default database name; must discover via SHOW DATABASES on 'system'.
+- [Graphiti add_episode reliability](graphiti-episode-storage.md) — Graphiti's add_episode makes many Gemini LLM calls; use PostgreSQL as primary store, Graphiti as best-effort background task.

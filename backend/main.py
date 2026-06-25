@@ -3,6 +3,7 @@ import os
 import sqlite3
 import uuid
 import tempfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 
@@ -10,27 +11,103 @@ import psycopg2
 import psycopg2.extras
 import pdfplumber
 from google import genai
-from google.genai import types
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from graphiti_core import Graphiti
+from graphiti_core.llm_client.gemini_client import GeminiClient
+from graphiti_core.llm_client.config import LLMConfig
+from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
+from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
+from graphiti_core.driver.neo4j_driver import Neo4jDriver
+from graphiti_core.nodes import EpisodeType
+from neo4j import AsyncGraphDatabase
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+NEO4J_URI = os.environ.get("NEO4J_URI", "")
+NEO4J_USERNAME = os.environ.get("NEO4J_USERNAME", "")
+NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
+graphiti: Graphiti | None = None
+
+
+async def _discover_neo4j_database() -> str:
+    raw = AsyncGraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USERNAME, NEO4J_PASSWORD))
+    try:
+        async with raw.session(database="system") as session:
+            result = await session.run("SHOW DATABASES WHERE name <> 'system'")
+            records = await result.data()
+            user_dbs = [r["name"] for r in records if r.get("name") != "system"]
+            return user_dbs[0] if user_dbs else "neo4j"
+    except Exception:
+        return "neo4j"
+    finally:
+        await raw.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global graphiti
+    try:
+        db_name = await _discover_neo4j_database()
+        print(f"[Graphiti] Using Neo4j database: {db_name}")
+        llm_client = GeminiClient(
+            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-2.5-flash-lite")
+        )
+        embedder = GeminiEmbedder(
+            GeminiEmbedderConfig(api_key=GEMINI_API_KEY, embedding_model="gemini-embedding-001")
+        )
+        cross_encoder = GeminiRerankerClient(
+            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-2.5-flash-lite")
+        )
+        graph_driver = Neo4jDriver(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, database=db_name)
+        graphiti = Graphiti(
+            llm_client=llm_client,
+            embedder=embedder,
+            cross_encoder=cross_encoder,
+            graph_driver=graph_driver,
+        )
+        await graphiti.build_indices_and_constraints()
+        print("[Graphiti] Initialized successfully")
+    except Exception as e:
+        print(f"[Graphiti] Failed to initialize: {e}")
+        graphiti = None
+    yield
+    if graphiti:
+        await graphiti.close()
 
 
 def get_db_conn():
     return psycopg2.connect(DATABASE_URL)
 
 
-# ---------------------------------------------------------------------------
-# SQLite metadata store — persists pdf_id + pdf_name + created_at on disk
-# so the home screen survives app restarts and Replit sleeps.
-# ---------------------------------------------------------------------------
+def _init_pg() -> None:
+    with get_db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id         SERIAL PRIMARY KEY,
+                    pdf_id     TEXT NOT NULL,
+                    role       TEXT NOT NULL,
+                    content    TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_pdf_id ON chat_messages(pdf_id)")
+        conn.commit()
+
+
+_init_pg()
+
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "pdf_metadata.db")
 
 
@@ -56,7 +133,7 @@ def _init_db() -> None:
 
 _init_db()
 
-app = FastAPI(title="Handbook Generator API")
+app = FastAPI(title="Handbook Generator API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,7 +145,7 @@ app.add_middleware(
 
 
 def embed_text(text: str) -> list[float]:
-    response = client.models.embed_content(
+    response = gemini_client.models.embed_content(
         model="gemini-embedding-001",
         contents=text,
         config={"output_dimensionality": 1536},
@@ -77,7 +154,7 @@ def embed_text(text: str) -> list[float]:
 
 
 def embed_query(text: str) -> list[float]:
-    response = client.models.embed_content(
+    response = gemini_client.models.embed_content(
         model="gemini-embedding-001",
         contents=text,
         config={"output_dimensionality": 1536},
@@ -115,8 +192,6 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     pdf_id = str(uuid.uuid4())
 
-    # De-duplicate: if a PDF with the same filename was uploaded before,
-    # remove its old chunks and metadata first.
     with _get_db() as meta_conn:
         existing = meta_conn.execute(
             "SELECT pdf_id FROM pdf_metadata WHERE pdf_name = ?", (file.filename,)
@@ -191,9 +266,7 @@ async def chat(req: ChatRequest):
         with get_db_conn() as pg:
             with pg.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT content FROM match_documents(%s::vector, %s, %s)
-                    """,
+                    "SELECT content FROM match_documents(%s::vector, %s, %s)",
                     (query_embedding, 5, req.pdf_id),
                 )
                 context_chunks = [row[0] for row in cur.fetchall()]
@@ -217,13 +290,74 @@ async def chat(req: ChatRequest):
         f"Question: {req.message}"
     )
 
-    response = client.models.generate_content(
+    response = gemini_client.models.generate_content(
         model="gemini-3.1-flash-lite",
         contents=prompt,
     )
     reply = response.text if response.text else "Sorry, I couldn't generate a response."
 
+    # Save to PostgreSQL immediately (reliable primary store)
+    try:
+        with get_db_conn() as pg:
+            with pg.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO chat_messages (pdf_id, role, content) VALUES (%s, %s, %s)",
+                    (req.pdf_id, "user", req.message),
+                )
+                cur.execute(
+                    "INSERT INTO chat_messages (pdf_id, role, content) VALUES (%s, %s, %s)",
+                    (req.pdf_id, "ai", reply),
+                )
+            pg.commit()
+    except Exception as e:
+        print(f"[DB] Failed to save chat messages: {e}")
+
+    # Also attempt Graphiti knowledge graph (best-effort background task)
+    if graphiti:
+        now = datetime.now(timezone.utc)
+
+        async def _save_episode():
+            try:
+                await graphiti.add_episode(
+                    name=f"chat_{req.pdf_id}_{now.timestamp()}",
+                    episode_body=f"User: {req.message}\nAI: {reply}",
+                    source_description=f"Chat for PDF {req.pdf_id}",
+                    reference_time=now,
+                    source=EpisodeType.message,
+                    group_id=req.pdf_id,
+                )
+                print(f"[Graphiti] Episode saved for pdf_id={req.pdf_id[:8]}")
+            except Exception as exc:
+                print(f"[Graphiti] add_episode failed (non-critical): {type(exc).__name__}")
+
+        asyncio.create_task(_save_episode())
+
     return {"reply": reply}
+
+
+@app.get("/messages/{pdf_id}")
+async def get_messages(pdf_id: str):
+    try:
+        with get_db_conn() as pg:
+            with pg.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, content, created_at
+                    FROM chat_messages
+                    WHERE pdf_id = %s
+                    ORDER BY created_at ASC
+                    LIMIT 400
+                    """,
+                    (pdf_id,),
+                )
+                rows = cur.fetchall()
+        return [
+            {"role": row[0], "content": row[1], "timestamp": row[2].isoformat()}
+            for row in rows
+        ]
+    except Exception as e:
+        print(f"[DB] get_messages failed: {e}")
+        return []
 
 
 HANDBOOK_SECTIONS = [
@@ -253,7 +387,7 @@ def generate_section(context: str, section_title: str, section_instruction: str,
     last_err = None
     for attempt in range(retries):
         try:
-            response = client.models.generate_content(
+            response = gemini_client.models.generate_content(
                 model="gemini-3.1-flash-lite",
                 contents=prompt,
             )
