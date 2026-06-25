@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sqlite3
+import traceback
 import uuid
 import tempfile
 from contextlib import asynccontextmanager
@@ -58,13 +59,13 @@ async def lifespan(app: FastAPI):
         db_name = await _discover_neo4j_database()
         print(f"[Graphiti] Using Neo4j database: {db_name}")
         llm_client = GeminiClient(
-            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-3.1-flash-lite")
+            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-1.5-flash")
         )
         embedder = GeminiEmbedder(
             GeminiEmbedderConfig(api_key=GEMINI_API_KEY, embedding_model="models/gemini-embedding-001")
         )
         cross_encoder = GeminiRerankerClient(
-            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-3.1-flash-lite")
+            LLMConfig(api_key=GEMINI_API_KEY, model="gemini-1.5-flash")
         )
         graph_driver = Neo4jDriver(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, database=db_name)
         graphiti = Graphiti(
@@ -326,25 +327,40 @@ async def chat(req: ChatRequest):
     except Exception as e:
         print(f"[DB] Failed to save chat messages: {e}")
 
-    # Also attempt Graphiti knowledge graph (best-effort background task)
+    # Write Episodic node directly to Neo4j (no LLM calls needed for basic storage)
     if graphiti:
         now = datetime.now(timezone.utc)
-
-        async def _save_episode():
-            try:
-                await graphiti.add_episode(
+        ep_uuid = str(uuid.uuid4())
+        _cypher = """
+        MERGE (e:Episodic {uuid: $uuid})
+        SET e.name              = $name,
+            e.group_id          = $group_id,
+            e.created_at        = $created_at,
+            e.source            = $source,
+            e.source_description= $source_description,
+            e.content           = $content,
+            e.valid_at          = $valid_at,
+            e.entity_edges      = []
+        RETURN e.uuid AS uuid
+        """
+        try:
+            async with graphiti.driver.session() as _session:
+                _result = await _session.run(
+                    _cypher,
+                    uuid=ep_uuid,
                     name=f"chat_{req.pdf_id}_{now.timestamp()}",
-                    episode_body=f"User: {req.message}\nAI: {reply}",
-                    source_description=f"Chat for PDF {req.pdf_id}",
-                    reference_time=now,
-                    source=EpisodeType.message,
                     group_id=req.pdf_id,
+                    created_at=now,
+                    source="message",
+                    source_description=f"Chat for PDF {req.pdf_id}",
+                    content=f"User: {req.message}\nAI: {reply}",
+                    valid_at=now,
                 )
-                print(f"[Graphiti] Episode saved for pdf_id={req.pdf_id[:8]}")
-            except Exception as exc:
-                print(f"[Graphiti] add_episode failed (non-critical): {type(exc).__name__}")
-
-        asyncio.create_task(_save_episode())
+                _rec = await _result.single()
+                print(f"[Graphiti] Episode written uuid={(_rec['uuid'] if _rec else ep_uuid)[:8]}")
+        except Exception:
+            print("[Graphiti] Direct episode write FAILED:")
+            traceback.print_exc()
 
     return {"reply": reply}
 
